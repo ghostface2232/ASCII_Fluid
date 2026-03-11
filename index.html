@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASCII Fluid Mesh</title>
+<meta name="theme-color" content="#8C5383">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #8C5383; cursor: none; }
+canvas { display: block; position: fixed; top: 0; left: 0; }
+.cursor {
+  position: fixed;
+  pointer-events: none;
+  z-index: 100;
+  width: 28px; height: 28px;
+  border: 2px solid rgba(215, 231, 195, 0.6);
+  border-radius: 50%;
+  transform: translate3d(-9999px, -9999px, 0) translate(-50%, -50%) scale(1);
+  mix-blend-mode: difference;
+  will-change: transform, opacity;
+  transition: opacity 0.3s ease;
+  opacity: 0;
+}
+.cursor.visible { opacity: 1; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="cursor" id="cursor"></div>
+<script>
+'use strict';
+
+// --- Config ---
+const CONFIG = {
+  // Grid & font
+  CELL: 14,
+  FONT_SIZE: 11,
+  CHARS: ' .:-=+*#%@&W\u2592\u2588',
+  MOBILE_CELL: 18,
+  // Colors
+  FG_HUE: 100,
+  FG_SAT: 80,
+  FG_LIG: 75,
+  BG: '#8C5383',
+  // Noise & flow
+  NOISE_SCALE: 2.5,
+  FLOW_SPEED_X: 0.06,
+  FLOW_SPEED_Y: 0.04,
+  CONTRAST: 1.3,
+  WIDE_WEIGHT: 0.65,
+  FINE_WEIGHT: 0.35,
+  FINE_SCALE_MULT: 3.0,
+  FINE_SPEED_X_MULT: 1.8,
+  FINE_SPEED_Y_MULT: 1.2,
+  // Breathing & smoothing
+  BREATH_SPEED: 0.3,
+  BREATH_AMOUNT: 0.08,
+  SMOOTH_BASE: 0.12,
+  SMOOTH_RANGE: 0.02,
+  HYSTERESIS: 0.04,
+  // Hover presence
+  HOVER_RADIUS: 270,
+  HOVER_BRIGHTNESS_BOOST: 0.4,
+  HOVER_PULSE_SPEED: 0.5,
+  HOVER_PULSE_AMOUNT: 0.24,
+  HOVER_RIPPLE_COUNT: 3,
+  HOVER_RIPPLE_SPEED: 10.0,
+  HOVER_RIPPLE_STRENGTH: 0.35,
+  HOVER_FADE_IN: 0.04,
+  HOVER_FADE_OUT: 0.015,
+  HOVER_LERP: 0.3,
+  HOVER_ELLIPSE_RATIO: 1.8,
+  HOVER_ELLIPSE_SPEED_CEIL: 0.015,
+  // Motion disturbance
+  MOTION_LERP: 0.15,
+  VEL_DIR_LERP: 0.15,
+  VEL_MAG_LERP: 0.12,
+  VEL_MAG_DECAY: 0.95,
+  STIR_RADIUS: 200,
+  STIR_STRENGTH: 4.0,
+  STIR_LONGITUDINAL: 1.0,
+  STIR_TRANSVERSE: 0.7,
+  STIR_SPEED_THRESHOLD: 0.0003,
+  STIR_SPEED_CEILING: 0.006,
+  MAX_DISTORT: 1.4,
+  DECAY_HOLD: 0.997,
+  DECAY_RELEASE: 0.965,
+  DECAY_THRESHOLD: 0.7,
+  DIFFUSE_RATE: 0.16,
+  STIR_BRIGHTNESS_BOOST: 0.45,
+  // Cursor
+  CURSOR_SPEED_SCALE: 6000,
+  CURSOR_MAX_GROW: 20,
+  CURSOR_BASE_SIZE: 28,
+  MAX_RIPPLES: 24,
+  CLICK_MERGE_MS: 90,
+  CLICK_MERGE_DIST: 32,
+  // Render
+  FADE_IN_RATE: 0.4,
+  ALPHA_BASE: 0.7,
+  ALPHA_RANGE: 0.25,
+  ALPHA_SKIP: 0.03,
+  ALPHA_STEPS: 20,
+  VIGNETTE_STRENGTH: 0.5,
+  VIGNETTE_THRESHOLD: 0.15,
+  SHOW_FPS: false,
+  // Click ripple
+  CLICK_SPEED: 450,
+  CLICK_STRENGTH: 0.25,
+  CLICK_RING_WIDTH: 40,
+  CLICK_DECAY: 0.975,
+  CLICK_BRIGHTNESS: 3.5,
+  // Scroll ripples
+  SCROLL_RIPPLE_COUNT: 3,
+  SCROLL_STRENGTH: 0.15,
+  SCROLL_SPEED: 350,
+  SCROLL_RING_WIDTH: 28,
+  SCROLL_DECAY: 0.98,
+  SCROLL_BRIGHTNESS: 3.5,
+  SCROLL_STAGGER: 90,
+  SCROLL_COOLDOWN: 120,
+  SCROLL_CONE: 0.766,
+  SCROLL_THRESHOLD: 2,
+  // Clock
+  CLOCK_RADIUS: 300,
+  CLOCK_HAND_HOUR: 20,
+  CLOCK_HAND_MIN: 14,
+  CLOCK_HAND_SEC: 8,
+  CLOCK_GLOW_HOUR: 36,
+  CLOCK_GLOW_MIN: 28,
+  CLOCK_GLOW_SEC: 20,
+  CLOCK_TRAIL: 2.8,
+  CLOCK_FOAM: 0.5,
+  CLOCK_CENTER: 10,
+  CLOCK_RING_WIDTH: 6,
+  CLOCK_MARKER_SIZE: 14,
+};
+
+// --- Reduced motion / mobile ---
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+if (reducedMotion) {
+  CONFIG.FLOW_SPEED_X = 0;
+  CONFIG.FLOW_SPEED_Y = 0;
+  CONFIG.BREATH_AMOUNT = 0;
+}
+if (innerWidth < 768) CONFIG.CELL = CONFIG.MOBILE_CELL;
+
+// --- Simplex Noise ---
+const perm = new Uint8Array(512);
+(function initPerm() {
+  const p = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) p[i] = i;
+  for (let i = 255; i > 0; i--) {
+    const j = (Math.random() * (i + 1)) | 0;
+    const tmp = p[i]; p[i] = p[j]; p[j] = tmp;
+  }
+  for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+})();
+
+const grad2 = [
+  [1, 0], [-1, 0], [0, 1], [0, -1],
+  [0.7071067811865476, 0.7071067811865476],
+  [-0.7071067811865476, 0.7071067811865476],
+  [0.7071067811865476, -0.7071067811865476],
+  [-0.7071067811865476, -0.7071067811865476]
+];
+
+const F2 = 0.5 * (Math.sqrt(3) - 1);
+const G2 = (3 - Math.sqrt(3)) / 6;
+
+function simplex2(x, y) {
+  const s = (x + y) * F2;
+  const i = Math.floor(x + s);
+  const j = Math.floor(y + s);
+  const t = (i + j) * G2;
+  const X0 = i - t;
+  const Y0 = j - t;
+  const x0 = x - X0;
+  const y0 = y - Y0;
+
+  let i1, j1;
+  if (x0 > y0) { i1 = 1; j1 = 0; }
+  else { i1 = 0; j1 = 1; }
+
+  const x1 = x0 - i1 + G2;
+  const y1 = y0 - j1 + G2;
+  const x2 = x0 - 1 + 2 * G2;
+  const y2 = y0 - 1 + 2 * G2;
+
+  const ii = i & 255;
+  const jj = j & 255;
+
+  let n0 = 0, n1 = 0, n2 = 0;
+
+  let t0 = 0.5 - x0 * x0 - y0 * y0;
+  if (t0 > 0) {
+    t0 *= t0;
+    const g = grad2[perm[ii + perm[jj]] & 7];
+    n0 = t0 * t0 * (g[0] * x0 + g[1] * y0);
+  }
+
+  let t1 = 0.5 - x1 * x1 - y1 * y1;
+  if (t1 > 0) {
+    t1 *= t1;
+    const g = grad2[perm[ii + i1 + perm[jj + j1]] & 7];
+    n1 = t1 * t1 * (g[0] * x1 + g[1] * y1);
+  }
+
+  let t2 = 0.5 - x2 * x2 - y2 * y2;
+  if (t2 > 0) {
+    t2 *= t2;
+    const g = grad2[perm[ii + 1 + perm[jj + 1]] & 7];
+    n2 = t2 * t2 * (g[0] * x2 + g[1] * y2);
+  }
+
+  return 70 * (n0 + n1 + n2);
+}
+
+function fbm(x, y, octaves) {
+  if (octaves === undefined) octaves = 4;
+  let sum = 0;
+  let amp = 1;
+  let freq = 1;
+  let ampSum = 0;
+  for (let o = 0; o < octaves; o++) {
+    sum += amp * simplex2(x * freq, y * freq);
+    ampSum += amp;
+    freq *= 2.0;
+    amp *= 0.5;
+  }
+  return sum / ampSum;
+}
+
+function smoothstep(edge0, edge1, x) {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
+
+function distToSeg(px, py, ax, ay, bx, by) {
+  const abx = bx - ax, aby = by - ay;
+  const apx = px - ax, apy = py - ay;
+  const len2 = abx * abx + aby * aby;
+  let t = len2 > 0 ? (apx * abx + apy * aby) / len2 : 0;
+  if (t < 0) t = 0; else if (t > 1) t = 1;
+  const dx = px - (ax + t * abx), dy = py - (ay + t * aby);
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// --- Canvas Setup ---
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const CHARS = CONFIG.CHARS;
+const CHARS_LEN = CHARS.length;
+const CHARS_MAX = CHARS_LEN - 1;
+let cols = 0, rows = 0;
+let prevBrightness = new Float32Array(0);
+let prevCharIndex = new Uint8Array(0);
+let distortion = new Float32Array(0);
+let distortPeak = new Float32Array(0);
+
+function dIdx(col, row) { return (row * cols + col) * 2; }
+function pIdx(col, row) { return row * cols + col; }
+
+const COLOR_CACHE = [];
+for (let i = 0; i < CHARS_LEN; i++) {
+  const b = i / CHARS_MAX;
+  const h = CONFIG.FG_HUE + (b - 0.5) * 8;
+  const l = CONFIG.FG_LIG + (b - 0.5) * 10;
+  COLOR_CACHE[i] = 'hsl(' + h + ',' + CONFIG.FG_SAT + '%,' + l + '%)';
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = innerWidth * dpr;
+  canvas.height = innerHeight * dpr;
+  canvas.style.width = innerWidth + 'px';
+  canvas.style.height = innerHeight + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cols = Math.ceil(innerWidth / CONFIG.CELL) + 1;
+  rows = Math.ceil(innerHeight / CONFIG.CELL) + 1;
+  prevBrightness = new Float32Array(cols * rows);
+  prevCharIndex = new Uint8Array(cols * rows);
+  distortion = new Float32Array(cols * rows * 2);
+  distortPeak = new Float32Array(cols * rows);
+  ctx.font = CONFIG.FONT_SIZE + 'px "SF Mono","Fira Code","Cascadia Code","Consolas",monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- Mouse State ---
+let mx = -9999, my = -9999;
+let mouseInside = false;
+let hoverX = -9999, hoverY = -9999;
+let hoverIntensity = 0;
+let smoothMx = -9999, smoothMy = -9999;
+let prevSmx = -9999, prevSmy = -9999;
+let velDirX = 0, velDirY = 0, velMag = 0;
+let currentSpeed = 0;
+const cursorEl = document.getElementById('cursor');
+let cursorVisible = false;
+let cursorDirty = true;
+let cursorScale = 1;
+let lastCursorX = -9999, lastCursorY = -9999, lastCursorScale = -1;
+
+function setCursorVisible(nextVisible) {
+  if (cursorVisible === nextVisible) return;
+  cursorVisible = nextVisible;
+  cursorEl.classList.toggle('visible', nextVisible);
+}
+
+function updateCursorTransform() {
+  if (!cursorVisible) return;
+  if (!cursorDirty &&
+      mx === lastCursorX &&
+      my === lastCursorY &&
+      Math.abs(cursorScale - lastCursorScale) < 0.001) return;
+  cursorEl.style.transform =
+    'translate3d(' + mx + 'px,' + my + 'px,0) translate(-50%, -50%) scale(' + cursorScale + ')';
+  lastCursorX = mx;
+  lastCursorY = my;
+  lastCursorScale = cursorScale;
+  cursorDirty = false;
+}
+
+canvas.addEventListener('mousemove', function(e) {
+  mx = e.clientX; my = e.clientY; mouseInside = true;
+  cursorDirty = true;
+  setCursorVisible(true);
+});
+canvas.addEventListener('mouseleave', function() {
+  mouseInside = false;
+  setCursorVisible(false);
+});
+canvas.addEventListener('touchmove', function(e) {
+  mx = e.touches[0].clientX; my = e.touches[0].clientY;
+  mouseInside = true;
+  cursorDirty = true;
+}, { passive: true });
+canvas.addEventListener('touchend', function() {
+  mouseInside = false;
+});
+
+// --- Ripples (click + scroll share the same array) ---
+const ripples = [];
+const pendingRipples = [];
+
+function tryMergeRipple(list, ripple) {
+  if (ripple.cone !== 0) return null;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const rp = list[i];
+    if (rp.cone !== 0) continue;
+    const ageMs = (time - rp.born) * 1000;
+    if (ageMs > CONFIG.CLICK_MERGE_MS) break;
+    const dx = rp.x - ripple.x;
+    const dy = rp.y - ripple.y;
+    if (dx * dx + dy * dy > CONFIG.CLICK_MERGE_DIST * CONFIG.CLICK_MERGE_DIST) continue;
+    rp.strength = Math.min(rp.strength + ripple.strength * 0.7, CONFIG.CLICK_STRENGTH * 2.2);
+    rp.bright = Math.max(rp.bright, ripple.bright);
+    rp.speed = Math.max(rp.speed, ripple.speed);
+    rp.ringW = Math.max(rp.ringW, ripple.ringW);
+    rp.decay = Math.min(rp.decay, ripple.decay);
+    rp.born = time;
+    return rp;
+  }
+  return null;
+}
+
+function hasRippleCapacity() {
+  return ripples.length + pendingRipples.length < CONFIG.MAX_RIPPLES;
+}
+
+function enqueueRipple(ripple) {
+  const merged = tryMergeRipple(pendingRipples, ripple) || tryMergeRipple(ripples, ripple);
+  if (merged) return merged;
+  if (!hasRippleCapacity()) return null;
+  pendingRipples.push(ripple);
+  return ripple;
+}
+
+function flushPendingRipples() {
+  if (pendingRipples.length === 0) return;
+  for (let i = 0; i < pendingRipples.length; i++) ripples.push(pendingRipples[i]);
+  pendingRipples.length = 0;
+}
+
+function spawnClickRipple(x, y) {
+  enqueueRipple({
+    x: x, y: y, radius: 0, strength: CONFIG.CLICK_STRENGTH,
+    speed: CONFIG.CLICK_SPEED, ringW: CONFIG.CLICK_RING_WIDTH, decay: CONFIG.CLICK_DECAY,
+    bright: CONFIG.CLICK_BRIGHTNESS, dirX: 0, dirY: 0, cone: 0, born: time
+  });
+}
+
+canvas.addEventListener('mousedown', function(e) {
+  spawnClickRipple(e.clientX, e.clientY);
+});
+canvas.addEventListener('touchstart', function(e) {
+  spawnClickRipple(e.touches[0].clientX, e.touches[0].clientY);
+}, { passive: true });
+let lastScrollTime = 0;
+canvas.addEventListener('wheel', function(e) {
+  e.preventDefault();
+  const now = performance.now();
+  if (now - lastScrollTime < CONFIG.SCROLL_COOLDOWN) return;
+  lastScrollTime = now;
+  const absDelta = Math.abs(e.deltaY);
+  if (absDelta < CONFIG.SCROLL_THRESHOLD) return;
+  const intensity = clamp(absDelta / 100, 0.3, 1.0);
+  const count = Math.max(1, Math.min(CONFIG.SCROLL_RIPPLE_COUNT, Math.ceil(absDelta / 30)));
+  const dirX = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? (e.deltaX > 0 ? 1 : -1) : 0;
+  const dirY = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? (e.deltaY > 0 ? 1 : -1) : 0;
+  for (let i = 0; i < count; i++) {
+    enqueueRipple({
+      x: mx, y: my,
+      radius: i * CONFIG.SCROLL_STAGGER,
+      strength: CONFIG.SCROLL_STRENGTH * intensity * (1 - i * 0.15),
+      speed: CONFIG.SCROLL_SPEED + i * 20,
+      ringW: CONFIG.SCROLL_RING_WIDTH,
+      decay: CONFIG.SCROLL_DECAY,
+      bright: CONFIG.SCROLL_BRIGHTNESS,
+      dirX: dirX, dirY: dirY,
+      cone: CONFIG.SCROLL_CONE,
+      born: time,
+    });
+  }
+}, { passive: false });
+
+// --- Animation Loop ---
+let prevTime = performance.now();
+let rafId = null;
+let time = 0;
+let fadeIn = reducedMotion ? 1 : 0;
+let distortDirty = false;
+const fpsBuffer = new Float32Array(10);
+let fpsIdx = 0, fpsDisplay = 0;
+
+function loop(now) {
+  const dt = Math.min((now - prevTime) / 1000, 0.05);
+  prevTime = now;
+  time += dt;
+  flushPendingRipples();
+  ctx.clearRect(0, 0, innerWidth, innerHeight);
+
+  // hover intensity interpolation
+  if (reducedMotion) hoverIntensity = 0;
+  else if (mouseInside) {
+    hoverIntensity += (1 - hoverIntensity) * CONFIG.HOVER_FADE_IN;
+  } else {
+    hoverIntensity += (0 - hoverIntensity) * CONFIG.HOVER_FADE_OUT;
+  }
+  if (hoverIntensity < 0.001) hoverIntensity = 0;
+
+  // hover coordinate interpolation
+  if (hoverX === -9999) { hoverX = mx; hoverY = my; }
+  if (mouseInside) {
+    hoverX += (mx - hoverX) * CONFIG.HOVER_LERP;
+    hoverY += (my - hoverY) * CONFIG.HOVER_LERP;
+  }
+
+  // --- Motion disturbance ---
+  if (!reducedMotion) {
+  // Step A: motion coordinate interpolation (faster than hover)
+  if (smoothMx === -9999) { smoothMx = mx; smoothMy = my; }
+  smoothMx += (mx - smoothMx) * CONFIG.MOTION_LERP;
+  smoothMy += (my - smoothMy) * CONFIG.MOTION_LERP;
+
+  // Step B: velocity and directional decomposition
+  if (mouseInside && prevSmx !== -9999) {
+    const rawVelX = (smoothMx - prevSmx) / innerWidth;
+    const rawVelY = (smoothMy - prevSmy) / innerHeight;
+    const speed = Math.sqrt(rawVelX * rawVelX + rawVelY * rawVelY);
+    currentSpeed = speed;
+    // store velocity direction for hover ellipse
+    if (speed > 0.00001) {
+      velDirX += (rawVelX / speed - velDirX) * CONFIG.VEL_DIR_LERP;
+      velDirY += (rawVelY / speed - velDirY) * CONFIG.VEL_DIR_LERP;
+      velMag += (speed - velMag) * CONFIG.VEL_MAG_LERP;
+    } else {
+      velMag *= CONFIG.VEL_MAG_DECAY;
+    }
+    const speedFactor = smoothstep(
+      CONFIG.STIR_SPEED_THRESHOLD,
+      CONFIG.STIR_SPEED_CEILING,
+      speed
+    );
+    if (speedFactor > 0.001) {
+      distortDirty = true;
+      const dirX = rawVelX / speed;
+      const dirY = rawVelY / speed;
+      const perpX = -dirY;
+      const perpY = dirX;
+      const sr = CONFIG.STIR_RADIUS;
+      const minCol = Math.max(0, Math.floor((smoothMx - sr) / CONFIG.CELL));
+      const maxCol = Math.min(cols - 1, Math.ceil((smoothMx + sr) / CONFIG.CELL));
+      const minRow = Math.max(0, Math.floor((smoothMy - sr) / CONFIG.CELL));
+      const maxRow = Math.min(rows - 1, Math.ceil((smoothMy + sr) / CONFIG.CELL));
+      for (let row = minRow; row <= maxRow; row++) {
+        for (let col = minCol; col <= maxCol; col++) {
+          const cellX = col * CONFIG.CELL + CONFIG.CELL * 0.5;
+          const cellY = row * CONFIG.CELL + CONFIG.CELL * 0.5;
+          // block stir inside clock
+          const scx = cellX - innerWidth * 0.5, scy = cellY - innerHeight * 0.5;
+          if (scx * scx + scy * scy < CONFIG.CLOCK_RADIUS * CONFIG.CLOCK_RADIUS) continue;
+          const dx = cellX - smoothMx;
+          const dy = cellY - smoothMy;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < sr) {
+            const falloff = smoothstep(sr, sr * 0.1, dist);
+            const side = dx * perpX + dy * perpY;
+            const sideSign = side >= 0 ? 1 : -1;
+            const longX = dirX * CONFIG.STIR_LONGITUDINAL;
+            const longY = dirY * CONFIG.STIR_LONGITUDINAL;
+            const transX = perpX * sideSign * CONFIG.STIR_TRANSVERSE;
+            const transY = perpY * sideSign * CONFIG.STIR_TRANSVERSE;
+            const forceX = (longX + transX) * speed * falloff * speedFactor * CONFIG.STIR_STRENGTH;
+            const forceY = (longY + transY) * speed * falloff * speedFactor * CONFIG.STIR_STRENGTH;
+            const di = dIdx(col, row);
+            const pi = pIdx(col, row);
+            distortion[di] += forceX;
+            distortion[di + 1] += forceY;
+            distortion[di] = clamp(distortion[di], -CONFIG.MAX_DISTORT, CONFIG.MAX_DISTORT);
+            distortion[di + 1] = clamp(distortion[di + 1], -CONFIG.MAX_DISTORT, CONFIG.MAX_DISTORT);
+            const mag = Math.sqrt(distortion[di] * distortion[di] + distortion[di + 1] * distortion[di + 1]);
+            if (mag > distortPeak[pi]) distortPeak[pi] = mag;
+          }
+        }
+      }
+    }
+  }
+  prevSmx = smoothMx;
+  prevSmy = smoothMy;
+  } // end !reducedMotion
+
+  // clock geometry (needed early for ripple reflection)
+  const clockCx = innerWidth * 0.5;
+  const clockCy = innerHeight * 0.5;
+  const cR = CONFIG.CLOCK_RADIUS;
+  const cR2 = cR * cR;
+
+  // Ripple-clock echo: spawn reflected ripples when ring hits clock boundary
+  for (let ri = ripples.length - 1; ri >= 0; ri--) {
+    const rp = ripples[ri];
+    if (rp.echo) continue;
+    const rdx = rp.x - clockCx;
+    const rdy = rp.y - clockCy;
+    const distC = Math.sqrt(rdx * rdx + rdy * rdy);
+    const distToRing = Math.abs(distC - cR);
+    if (rp.radius >= distToRing && rp.strength > 0.01) {
+      rp.echo = true;
+      const ang = Math.atan2(rdy, rdx);
+      const echoCount = rp.cone > 0 ? 2 : 5;
+      const spread = 0.3;
+      for (let ei = 0; ei < echoCount; ei++) {
+        const a = ang + (ei - (echoCount - 1) * 0.5) * spread;
+        const enx = Math.cos(a);
+        const eny = Math.sin(a);
+        enqueueRipple({
+          x: clockCx + enx * cR, y: clockCy + eny * cR,
+          radius: 0,
+          strength: rp.strength * 0.6,
+          speed: rp.speed * 0.7,
+          ringW: rp.ringW * 0.7,
+          decay: rp.decay,
+          bright: rp.bright * 0.7,
+          dirX: enx, dirY: eny,
+          cone: 0.3,
+          echo: true,
+          born: time,
+        });
+      }
+    }
+  }
+
+  // Ripple processing (unified: click = full circle, scroll = directional arc)
+  for (let ri = ripples.length - 1; ri >= 0; ri--) {
+    const rp = ripples[ri];
+    rp.radius += rp.speed * dt;
+    rp.strength *= rp.decay;
+    if (rp.strength < 0.001) { ripples.splice(ri, 1); continue; }
+    distortDirty = true;
+    const rInner = rp.radius - rp.ringW * 0.5;
+    const rOuter = rp.radius + rp.ringW * 0.5;
+    const cell = CONFIG.CELL;
+    const minCol = Math.max(0, Math.floor((rp.x - rOuter) / cell));
+    const maxCol = Math.min(cols - 1, Math.ceil((rp.x + rOuter) / cell));
+    const minRow = Math.max(0, Math.floor((rp.y - rOuter) / cell));
+    const maxRow = Math.min(rows - 1, Math.ceil((rp.y + rOuter) / cell));
+    for (let row = minRow; row <= maxRow; row++) {
+      for (let col = minCol; col <= maxCol; col++) {
+        const cx = col * cell + cell * 0.5;
+        const cy = row * cell + cell * 0.5;
+        // block ripple distortion inside clock boundary
+        const ccx = cx - clockCx, ccy = cy - clockCy;
+        if (ccx * ccx + ccy * ccy < cR2) continue;
+        const ddx = cx - rp.x;
+        const ddy = cy - rp.y;
+        const dist = Math.sqrt(ddx * ddx + ddy * ddy);
+        if (dist < rInner || dist > rOuter || dist < 0.001) continue;
+        // directional cone filter (cone=0 means full circle)
+        let coneFactor = 1;
+        if (rp.cone > 0) {
+          const dot = (ddx * rp.dirX + ddy * rp.dirY) / dist;
+          if (dot < rp.cone) continue;
+          coneFactor = smoothstep(rp.cone, 1, dot);
+        }
+        const ringPos = (dist - rInner) / rp.ringW;
+        const envelope = Math.sin(ringPos * Math.PI) * coneFactor;
+        // suppress distortion for first 0.2s (prevents bright residue at spawn point)
+        const originFade = smoothstep(rp.born, rp.born + 0.2, time);
+        const nx = ddx / dist;
+        const ny = ddy / dist;
+        const force = envelope * rp.strength * originFade;
+        const di = dIdx(col, row);
+        distortion[di]     += nx * force;
+        distortion[di + 1] += ny * force;
+        distortion[di]     = clamp(distortion[di], -CONFIG.MAX_DISTORT, CONFIG.MAX_DISTORT);
+        distortion[di + 1] = clamp(distortion[di + 1], -CONFIG.MAX_DISTORT, CONFIG.MAX_DISTORT);
+      }
+    }
+  }
+
+  // Step C + D: decay and diffusion (skip if nothing to process)
+  if (distortDirty) {
+    let anyActive = false;
+    for (let i = 0; i < cols * rows; i++) {
+      const di = i * 2;
+      const ox = distortion[di], oy = distortion[di + 1];
+      const mag = Math.sqrt(ox * ox + oy * oy);
+
+      if (mag < 0.0001) {
+        distortion[di] = 0;
+        distortion[di + 1] = 0;
+        distortPeak[i] = 0;
+        continue;
+      }
+
+      anyActive = true;
+      const ratio = distortPeak[i] > 0 ? mag / distortPeak[i] : 0;
+      const decay = ratio > CONFIG.DECAY_THRESHOLD
+        ? CONFIG.DECAY_HOLD
+        : CONFIG.DECAY_RELEASE;
+
+      distortion[di]     *= decay;
+      distortion[di + 1] *= decay;
+    }
+
+    if (anyActive) {
+      const diffRate = CONFIG.DIFFUSE_RATE;
+      const distSnap = new Float32Array(distortion);
+      const halfC = CONFIG.CELL * 0.5;
+      for (let row = 1; row < rows - 1; row++) {
+        for (let col = 1; col < cols - 1; col++) {
+          // clock boundary reflection: skip diffusion into clock interior
+          const cpx = col * CONFIG.CELL + halfC - clockCx;
+          const cpy = row * CONFIG.CELL + halfC - clockCy;
+          const cd2 = cpx * cpx + cpy * cpy;
+          if (cd2 < cR2) continue; // inside clock: wall
+
+          const di = (row * cols + col) * 2;
+          const dL = ((row) * cols + (col - 1)) * 2;
+          const dR = ((row) * cols + (col + 1)) * 2;
+          const dU = ((row - 1) * cols + col) * 2;
+          const dD = ((row + 1) * cols + col) * 2;
+
+          // for neighbors inside the clock, mirror the current cell (Neumann BC)
+          const lpx = (col - 1) * CONFIG.CELL + halfC - clockCx;
+          const lpy = cpy;
+          const sL = (lpx * lpx + lpy * lpy < cR2) ? di : dL;
+          const rpx = (col + 1) * CONFIG.CELL + halfC - clockCx;
+          const sR = (rpx * rpx + cpy * cpy < cR2) ? di : dR;
+          const upy = (row - 1) * CONFIG.CELL + halfC - clockCy;
+          const sU = (cpx * cpx + upy * upy < cR2) ? di : dU;
+          const dpy = (row + 1) * CONFIG.CELL + halfC - clockCy;
+          const sD = (cpx * cpx + dpy * dpy < cR2) ? di : dD;
+
+          const lapX = distSnap[sL] + distSnap[sR] + distSnap[sU] + distSnap[sD] - 4 * distSnap[di];
+          const lapY = distSnap[sL + 1] + distSnap[sR + 1] + distSnap[sU + 1] + distSnap[sD + 1] - 4 * distSnap[di + 1];
+          distortion[di]     += lapX * diffRate;
+          distortion[di + 1] += lapY * diffRate;
+        }
+      }
+    } else {
+      distortDirty = false;
+    }
+  }
+
+  // cursor size reaction
+  const cursorSize = CONFIG.CURSOR_BASE_SIZE + clamp(currentSpeed * CONFIG.CURSOR_SPEED_SCALE, 0, CONFIG.CURSOR_MAX_GROW);
+  cursorScale = cursorSize / CONFIG.CURSOR_BASE_SIZE;
+  updateCursorTransform();
+
+  // initial fade-in
+  fadeIn = Math.min(1, fadeIn + dt * CONFIG.FADE_IN_RATE);
+
+  // FPS counter
+  if (CONFIG.SHOW_FPS) {
+    fpsBuffer[fpsIdx % 10] = dt > 0 ? 1 / dt : 0;
+    fpsIdx++;
+    if (fpsIdx % 10 === 0) {
+      let sum = 0;
+      for (let i = 0; i < 10; i++) sum += fpsBuffer[i];
+      fpsDisplay = (sum / 10) | 0;
+    }
+  }
+
+  const cell = CONFIG.CELL;
+  const halfCell = cell * 0.5;
+  const breathPhase = Math.sin(time * CONFIG.BREATH_SPEED);
+  const breath = 1.0 + breathPhase * CONFIG.BREATH_AMOUNT;
+  const smoothFactor = CONFIG.SMOOTH_BASE + breathPhase * CONFIG.SMOOTH_RANGE;
+  const hysThreshold = CONFIG.HYSTERESIS * CHARS_LEN;
+  let lastCI = -1;
+  let lastQA = -1;
+
+  // hover bounding box
+  const hoverActive = hoverIntensity > 0.001 && !reducedMotion;
+  let hMinCol = 0, hMaxCol = 0, hMinRow = 0, hMaxRow = 0;
+  if (hoverActive) {
+    const ellipseT = smoothstep(0, CONFIG.HOVER_ELLIPSE_SPEED_CEIL, velMag);
+    const hoverReach = CONFIG.HOVER_RADIUS * (1.0 + ellipseT * (CONFIG.HOVER_ELLIPSE_RATIO - 1.0));
+    hMinCol = Math.max(0, Math.floor((hoverX - hoverReach) / cell));
+    hMaxCol = Math.min(cols - 1, Math.ceil((hoverX + hoverReach) / cell));
+    hMinRow = Math.max(0, Math.floor((hoverY - hoverReach) / cell));
+    hMaxRow = Math.min(rows - 1, Math.ceil((hoverY + hoverReach) / cell));
+  }
+
+  // --- Clock (per-frame: hand angles & endpoints) ---
+  const clockNow = new Date();
+  const clockSec = clockNow.getSeconds() + clockNow.getMilliseconds() / 1000;
+  const clockMin = clockNow.getMinutes() + clockSec / 60;
+  const clockHr = (clockNow.getHours() % 12) + clockMin / 60;
+  const TWO_PI = Math.PI * 2;
+  const HALF_PI = Math.PI * 0.5;
+
+  const secA = clockSec / 60 * TWO_PI - HALF_PI;
+  const minA = clockMin / 60 * TWO_PI - HALF_PI;
+  const hrA  = clockHr / 12 * TWO_PI - HALF_PI;
+
+  const secEx = clockCx + Math.cos(secA) * cR * 0.88;
+  const secEy = clockCy + Math.sin(secA) * cR * 0.88;
+  const minEx = clockCx + Math.cos(minA) * cR * 0.7;
+  const minEy = clockCy + Math.sin(minA) * cR * 0.7;
+  const hrEx  = clockCx + Math.cos(hrA)  * cR * 0.45;
+  const hrEy  = clockCy + Math.sin(hrA)  * cR * 0.45;
+
+  // clock bounding box
+  const cMinCol = Math.max(0, Math.floor((clockCx - cR * 1.05) / cell));
+  const cMaxCol = Math.min(cols - 1, Math.ceil((clockCx + cR * 1.05) / cell));
+  const cMinRow = Math.max(0, Math.floor((clockCy - cR * 1.05) / cell));
+  const cMaxRow = Math.min(rows - 1, Math.ceil((clockCy + cR * 1.05) / cell));
+
+  // --- Render grid ---
+  for (let r = 0; r < rows; r++) {
+    const py = r * CONFIG.CELL + halfCell;
+    if (py < -halfCell || py > innerHeight + halfCell) continue;
+    const ny = r / rows;
+    const cy = (ny - 0.5) * 2.0;
+    for (let c = 0; c < cols; c++) {
+      const px = c * CONFIG.CELL + halfCell;
+      if (px < -halfCell || px > innerWidth + halfCell) continue;
+      const nx = c / cols;
+      const _cdx = px - clockCx, _cdy = py - clockCy;
+      const insideClock = _cdx * _cdx + _cdy * _cdy < cR2;
+
+      // UV distortion offset
+      const di = dIdx(c, r);
+      const uvOffX = distortion[di];
+      const uvOffY = distortion[di + 1];
+
+      // dual-layer noise (with UV offset)
+      const wide = fbm(
+        (nx + uvOffX) * CONFIG.NOISE_SCALE + time * CONFIG.FLOW_SPEED_X,
+        (ny + uvOffY) * CONFIG.NOISE_SCALE + time * CONFIG.FLOW_SPEED_Y,
+        4
+      );
+      const fine = fbm(
+        (nx + uvOffX) * CONFIG.NOISE_SCALE * CONFIG.FINE_SCALE_MULT + time * CONFIG.FLOW_SPEED_X * CONFIG.FINE_SPEED_X_MULT,
+        (ny + uvOffY) * CONFIG.NOISE_SCALE * CONFIG.FINE_SCALE_MULT - time * CONFIG.FLOW_SPEED_Y * CONFIG.FINE_SPEED_Y_MULT,
+        2
+      );
+      let combined = (wide * CONFIG.WIDE_WEIGHT + fine * CONFIG.FINE_WEIGHT) * breath;
+
+      // normalize + contrast
+      let brightness = (combined + 1) * 0.5;
+      brightness = clamp((brightness - 0.5) * CONFIG.CONTRAST + 0.5, 0, 1);
+
+      // temporal smoothing
+      const cellIdx = r * cols + c;
+      const prev = prevBrightness[cellIdx];
+      const smoothed = prev === 0 ? brightness : prev + (brightness - prev) * smoothFactor;
+      prevBrightness[cellIdx] = smoothed;
+      brightness = smoothed;
+
+      // hover presence (ellipse deformation based on velocity)
+      let hoverBoost = 0;
+      if (hoverActive && c >= hMinCol && c <= hMaxCol && r >= hMinRow && r <= hMaxRow) {
+        const hdx = px - hoverX;
+        const hdy = py - hoverY;
+
+        // ellipse: stretch along velocity direction
+        const ellipseT = smoothstep(0, CONFIG.HOVER_ELLIPSE_SPEED_CEIL, velMag);
+        const stretch = 1.0 + ellipseT * (CONFIG.HOVER_ELLIPSE_RATIO - 1.0);
+        // project delta onto velocity dir and perpendicular
+        const vLen = Math.sqrt(velDirX * velDirX + velDirY * velDirY);
+        let eDist;
+        if (vLen > 0.001 && stretch > 1.01) {
+          const nvx = velDirX / vLen, nvy = velDirY / vLen;
+          const along = hdx * nvx + hdy * nvy;
+          const perp = hdx * (-nvy) + hdy * nvx;
+          // only stretch backward (along < 0 = behind cursor)
+          const effectiveStretch = along < 0 ? stretch : 1.0;
+          eDist = Math.sqrt((along / effectiveStretch) * (along / effectiveStretch) + perp * perp);
+        } else {
+          eDist = Math.sqrt(hdx * hdx + hdy * hdy);
+        }
+
+        if (eDist < CONFIG.HOVER_RADIUS) {
+          const falloff = smoothstep(CONFIG.HOVER_RADIUS, 0, eDist);
+          const pulse = 1.0 + Math.sin(time * CONFIG.HOVER_PULSE_SPEED) * CONFIG.HOVER_PULSE_AMOUNT;
+          const normDist = eDist / CONFIG.HOVER_RADIUS;
+          const ripple = Math.sin(normDist * CONFIG.HOVER_RIPPLE_COUNT * Math.PI * 2 - time * CONFIG.HOVER_RIPPLE_SPEED);
+          const rippleBoost = ripple * CONFIG.HOVER_RIPPLE_STRENGTH * falloff;
+          hoverBoost = (CONFIG.HOVER_BRIGHTNESS_BOOST + rippleBoost) * falloff * pulse * hoverIntensity;
+        }
+      }
+
+      // stir brightness boost (diminishing returns via sqrt)
+      let stirBoost = 0;
+      const stirMag = !reducedMotion ? Math.sqrt(uvOffX * uvOffX + uvOffY * uvOffY) : 0;
+      if (stirMag > 0.001) {
+        stirBoost = Math.sqrt(stirMag) * CONFIG.STIR_BRIGHTNESS_BOOST;
+      }
+
+      // hover and stir compete (max, not sum) to prevent compound saturation
+      brightness = clamp(brightness + Math.max(hoverBoost, stirBoost), 0, 1);
+
+      // ripple brightness (unified) — blocked inside clock
+      if (insideClock) { /* skip ripple brightness */ } else
+      for (let ri = 0; ri < ripples.length; ri++) {
+        const rp = ripples[ri];
+        const rdx = px - rp.x;
+        const rdy = py - rp.y;
+        const rDist = Math.sqrt(rdx * rdx + rdy * rdy);
+        if (rDist < 0.001) continue;
+        const rInner = rp.radius - rp.ringW * 0.5;
+        const rOuter = rp.radius + rp.ringW * 0.5;
+        if (rDist < rInner || rDist > rOuter) continue;
+        let coneFactor = 1;
+        if (rp.cone > 0) {
+          const dot = (rdx * rp.dirX + rdy * rp.dirY) / rDist;
+          if (dot < rp.cone) continue;
+          coneFactor = smoothstep(rp.cone, 1, dot);
+        }
+        const ringPos = (rDist - rInner) / rp.ringW;
+        // outer edge bright and thick, inner fades
+        const edgeBias = ringPos * ringPos;
+        const envelope = edgeBias * coneFactor;
+        brightness = clamp(brightness + envelope * rp.strength * rp.bright, 0, 1);
+      }
+
+      // --- Clock erasing + glow ---
+      if (c >= cMinCol && c <= cMaxCol && r >= cMinRow && r <= cMaxRow) {
+        const ckdx = px - clockCx;
+        const ckdy = py - clockCy;
+        const ckDist = Math.sqrt(ckdx * ckdx + ckdy * ckdy);
+
+        if (ckDist < cR * 1.1) {
+          let clockErase = 0;
+          let clockGlow = 0;
+
+          // center pin
+          if (ckDist < CONFIG.CLOCK_CENTER) {
+            clockErase = smoothstep(CONFIG.CLOCK_CENTER, 0, ckDist);
+          }
+
+          // clock face ring (erase core + glow edges)
+          const ringDelta = Math.abs(ckDist - cR);
+          if (ringDelta < CONFIG.CLOCK_RING_WIDTH) {
+            clockErase = Math.max(clockErase, smoothstep(CONFIG.CLOCK_RING_WIDTH, 0, ringDelta) * 0.6);
+          } else if (ringDelta < CONFIG.CLOCK_RING_WIDTH * 2.5) {
+            clockGlow = Math.max(clockGlow, smoothstep(CONFIG.CLOCK_RING_WIDTH * 2.5, CONFIG.CLOCK_RING_WIDTH, ringDelta) * 0.35);
+          }
+
+          // hour hand: erase core, glow edge
+          const dH = distToSeg(px, py, clockCx, clockCy, hrEx, hrEy);
+          if (dH < CONFIG.CLOCK_HAND_HOUR) {
+            clockErase = Math.max(clockErase, smoothstep(CONFIG.CLOCK_HAND_HOUR, 0, dH));
+          } else if (dH < CONFIG.CLOCK_GLOW_HOUR) {
+            clockGlow = Math.max(clockGlow, smoothstep(CONFIG.CLOCK_GLOW_HOUR, CONFIG.CLOCK_HAND_HOUR, dH) * 0.5);
+          }
+
+          // minute hand: erase core, glow edge
+          const dM = distToSeg(px, py, clockCx, clockCy, minEx, minEy);
+          if (dM < CONFIG.CLOCK_HAND_MIN) {
+            clockErase = Math.max(clockErase, smoothstep(CONFIG.CLOCK_HAND_MIN, 0, dM));
+          } else if (dM < CONFIG.CLOCK_GLOW_MIN) {
+            clockGlow = Math.max(clockGlow, smoothstep(CONFIG.CLOCK_GLOW_MIN, CONFIG.CLOCK_HAND_MIN, dM) * 0.45);
+          }
+
+          // second hand: erase core, glow edge
+          const dS = distToSeg(px, py, clockCx, clockCy, secEx, secEy);
+          if (dS < CONFIG.CLOCK_HAND_SEC) {
+            clockErase = Math.max(clockErase, smoothstep(CONFIG.CLOCK_HAND_SEC, 0, dS));
+          } else if (dS < CONFIG.CLOCK_GLOW_SEC) {
+            clockGlow = Math.max(clockGlow, smoothstep(CONFIG.CLOCK_GLOW_SEC, CONFIG.CLOCK_HAND_SEC, dS) * 0.4);
+          }
+
+          // second hand sweeping trail + forward foam
+          if (ckDist < cR * 0.88 && ckDist > CONFIG.CLOCK_CENTER) {
+            const cellAngle = Math.atan2(ckdy, ckdx);
+            // trail behind (clockwise wake)
+            let behind = secA - cellAngle;
+            behind = ((behind % TWO_PI) + TWO_PI) % TWO_PI;
+            if (behind < CONFIG.CLOCK_TRAIL) {
+              const trailT = 1.0 - behind / CONFIG.CLOCK_TRAIL;
+              const radialT = ckDist / (cR * 0.88);
+              clockErase = Math.max(clockErase, trailT * trailT * radialT * 0.75);
+            }
+            // foam ahead (bright bow wave in front of second hand)
+            let ahead = cellAngle - secA;
+            ahead = ((ahead % TWO_PI) + TWO_PI) % TWO_PI;
+            if (ahead < CONFIG.CLOCK_FOAM) {
+              const foamT = 1.0 - ahead / CONFIG.CLOCK_FOAM;
+              const radialT = ckDist / (cR * 0.88);
+              clockGlow = Math.max(clockGlow, foamT * foamT * foamT * radialT * 0.55);
+            }
+          }
+
+          // hour markers (bright dots on rim)
+          if (ckDist > cR * 0.82 && ckDist < cR * 0.99) {
+            for (let h = 0; h < 12; h++) {
+              const hA = h / 12 * TWO_PI - HALF_PI;
+              const mkx = clockCx + Math.cos(hA) * cR * 0.91;
+              const mky = clockCy + Math.sin(hA) * cR * 0.91;
+              const mDist = Math.sqrt((px - mkx) * (px - mkx) + (py - mky) * (py - mky));
+              const mSize = (h % 3 === 0) ? CONFIG.CLOCK_MARKER_SIZE : CONFIG.CLOCK_MARKER_SIZE * 0.6;
+              if (mDist < mSize) {
+                clockGlow = Math.max(clockGlow, smoothstep(mSize, 0, mDist) * 0.6);
+              }
+            }
+          }
+
+          // apply: erase reduces brightness, glow boosts it
+          brightness = brightness * (1.0 - clockErase) + clockGlow;
+          brightness = clamp(brightness, 0, 1);
+        }
+      }
+
+      // hysteresis
+      const charIndexRaw = brightness * CHARS_MAX;
+      const prevIdx = prevCharIndex[cellIdx];
+      let charIndex;
+      if (Math.abs(charIndexRaw - prevIdx) > hysThreshold) {
+        charIndex = clamp(Math.floor(charIndexRaw), 0, CHARS_MAX);
+      } else {
+        charIndex = prevIdx;
+      }
+      prevCharIndex[cellIdx] = charIndex;
+
+      // alpha + vignette
+      let alpha = CONFIG.ALPHA_BASE + brightness * CONFIG.ALPHA_RANGE;
+      const cx = (nx - 0.5) * 2.0;
+      const edgeDist = Math.sqrt(cx * cx + cy * cy) / 1.414;
+      const vignette = 1.0 - edgeDist * edgeDist * CONFIG.VIGNETTE_STRENGTH;
+      alpha *= vignette;
+
+      let ch = CHARS[charIndex];
+      if (vignette < CONFIG.VIGNETTE_THRESHOLD) ch = ' ';
+
+      const finalAlpha = alpha * fadeIn;
+      // skip invisible cells
+      if (finalAlpha < CONFIG.ALPHA_SKIP || ch === ' ') continue;
+
+      // fillStyle optimization
+      if (charIndex !== lastCI) {
+        ctx.fillStyle = COLOR_CACHE[charIndex];
+        lastCI = charIndex;
+      }
+      // globalAlpha quantization
+      const qa = (finalAlpha * CONFIG.ALPHA_STEPS + 0.5) | 0;
+      if (qa !== lastQA) {
+        ctx.globalAlpha = qa / CONFIG.ALPHA_STEPS;
+        lastQA = qa;
+      }
+      ctx.fillText(ch, px, py);
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // FPS display
+  if (CONFIG.SHOW_FPS && fpsDisplay > 0) {
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(fpsDisplay + ' fps', 8, 16);
+    ctx.font = CONFIG.FONT_SIZE + 'px "SF Mono","Fira Code","Cascadia Code","Consolas",monospace';
+    ctx.textAlign = 'center';
+  }
+
+  rafId = requestAnimationFrame(loop);
+}
+rafId = requestAnimationFrame(loop);
+
+// --- Visibility change ---
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  } else {
+    prevTime = performance.now();
+    rafId = requestAnimationFrame(loop);
+  }
+});
+</script>
+</body>
+</html>
