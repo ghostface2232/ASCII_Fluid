@@ -4,11 +4,102 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ASCII Fluid Mesh</title>
+<meta name="description" content="Interactive ASCII fluid clock and ripple field, packaged to install like a lightweight web app.">
 <meta name="theme-color" content="#8C5383">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ASCII Fluid">
+<link rel="manifest" href="./site.webmanifest">
+<link rel="icon" href="./assets/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="./assets/apple-touch-icon.png">
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { width: 100%; height: 100%; overflow: hidden; background: #8C5383; cursor: none; }
 canvas { display: block; position: fixed; top: 0; left: 0; }
+:root {
+  --bg: #8c5383;
+  --panel-bg: rgba(23, 9, 31, 0.42);
+  --panel-border: rgba(255, 255, 255, 0.16);
+  --copy: rgba(250, 246, 255, 0.9);
+  --copy-muted: rgba(250, 246, 255, 0.72);
+  --accent: #d7e7c3;
+  --accent-strong: #f4ffb8;
+}
+.app-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: max(18px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
+}
+.brand-card {
+  width: min(100%, 360px);
+  padding: 18px 18px 16px;
+  border: 1px solid var(--panel-border);
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+    var(--panel-bg);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 20px 60px rgba(18, 7, 24, 0.28);
+  color: var(--copy);
+}
+.eyebrow {
+  margin-bottom: 8px;
+  font: 600 11px/1.2 "Segoe UI", sans-serif;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.brand-card h1 {
+  margin-bottom: 8px;
+  font: 700 clamp(24px, 4vw, 31px)/1.02 "Georgia", "Times New Roman", serif;
+}
+.app-copy {
+  font: 400 14px/1.5 "Segoe UI", sans-serif;
+  color: var(--copy-muted);
+}
+.app-actions {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  pointer-events: auto;
+}
+.install-btn {
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 11px 16px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: #1b1022;
+  font: 700 13px/1 "Segoe UI", sans-serif;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  box-shadow: 0 10px 28px rgba(215, 231, 195, 0.28);
+}
+.install-btn:hover,
+.install-btn:focus-visible {
+  transform: translateY(-1px);
+  filter: saturate(1.05);
+  outline: none;
+}
+.install-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--copy-muted);
+  font: 500 12px/1.35 "Segoe UI", sans-serif;
+}
 .cursor {
   position: fixed;
   pointer-events: none;
@@ -23,10 +114,34 @@ canvas { display: block; position: fixed; top: 0; left: 0; }
   opacity: 0;
 }
 .cursor.visible { opacity: 1; }
+@media (max-width: 640px) {
+  .app-shell {
+    align-items: flex-end;
+  }
+
+  .brand-card {
+    border-radius: 18px;
+  }
+
+  .brand-card h1 {
+    font-size: 26px;
+  }
+}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+<div class="app-shell" aria-live="polite">
+  <section class="brand-card" aria-label="Application overview">
+    <p class="eyebrow">Installable Canvas</p>
+    <h1>ASCII Fluid Mesh</h1>
+    <p class="app-copy">A clock-driven ASCII fluid field with ripple interaction. Drag, click, or scroll it in the browser, then install it as a lightweight app.</p>
+    <div class="app-actions">
+      <button class="install-btn" id="installButton" type="button" hidden>Install App</button>
+      <span class="install-status" id="installStatus">Offline cache becomes available after the first successful load.</span>
+    </div>
+  </section>
+</div>
 <div class="cursor" id="cursor"></div>
 <script>
 'use strict';
@@ -302,10 +417,48 @@ let prevSmx = -9999, prevSmy = -9999;
 let velDirX = 0, velDirY = 0, velMag = 0;
 let currentSpeed = 0;
 const cursorEl = document.getElementById('cursor');
+const installButton = document.getElementById('installButton');
+const installStatus = document.getElementById('installStatus');
 let cursorVisible = false;
 let cursorDirty = true;
 let cursorScale = 1;
 let lastCursorX = -9999, lastCursorY = -9999, lastCursorScale = -1;
+let deferredInstallPrompt = null;
+
+function setInstallMessage(message, canInstall) {
+  installStatus.textContent = message;
+  installButton.hidden = !canInstall;
+}
+
+const standaloneMode = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+if (standaloneMode) {
+  setInstallMessage('Running in installed app mode.', false);
+} else {
+  setInstallMessage('Offline cache becomes available after the first successful load.', false);
+}
+
+window.addEventListener('beforeinstallprompt', function(e) {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  setInstallMessage('This build is ready to install on supported browsers.', true);
+});
+
+installButton.addEventListener('click', async function() {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  const choice = await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  if (choice.outcome === 'accepted') {
+    setInstallMessage('Install request accepted. The app will open from your launcher once installed.', false);
+    return;
+  }
+  setInstallMessage('Install dismissed. You can still share the page directly by URL.', false);
+});
+
+window.addEventListener('appinstalled', function() {
+  deferredInstallPrompt = null;
+  setInstallMessage('Installed successfully. Future visits can run offline from cache.', false);
+});
 
 function setCursorVisible(nextVisible) {
   if (cursorVisible === nextVisible) return;
@@ -1018,6 +1171,22 @@ document.addEventListener('visibilitychange', () => {
     rafId = requestAnimationFrame(loop);
   }
 });
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function() {
+    navigator.serviceWorker.register('./sw.js', { scope: './' }).then(function() {
+      if (!standaloneMode && !deferredInstallPrompt) {
+        setInstallMessage('App shell cached. Install becomes available when the browser exposes it.', false);
+      }
+    }).catch(function() {
+      if (!standaloneMode) {
+        setInstallMessage('Live mode only. Service worker registration failed in this environment.', false);
+      }
+    });
+  });
+} else if (!standaloneMode) {
+  setInstallMessage('This browser does not support service workers, so install mode is unavailable.', false);
+}
 </script>
 </body>
 </html>
